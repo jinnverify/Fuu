@@ -1,7 +1,6 @@
 'use strict';
 
 const express    = require('express');
-const dgram      = require('dgram');
 const crypto     = require('crypto');
 const path       = require('path');
 const { encode, decode } = require('./VoxCipher');
@@ -11,9 +10,7 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
 const HTTP_PORT = process.env.PORT || 3000;
-const UDP_PORT  = process.env.UDP_PORT || 45000;
 
-// Auto-detect own hostname from request headers
 function getHost(req) {
     return req?.get('host') || 'localhost:' + HTTP_PORT;
 }
@@ -21,7 +18,7 @@ function getHost(req) {
 // ── In-memory state ───────────────────────────────────────────────────────────
 const rooms   = new Map();
 const tokens  = new Map();
-const udpKeys = new Map(); // "ROOMID:userId" → 4-byte Buffer
+const signalQueues = new Map(); // "roomId:userId" → [{from, type, payload, ts}]
 
 class Room {
     constructor(id, password, label) {
@@ -44,11 +41,32 @@ class Member {
     }
 }
 
+// ── Rate limiting ─────────────────────────────────────────────────────────────
+const rateLimits = new Map();
+function rateLimit(req, res, maxPerMinute) {
+    const ip = req.ip || req.connection.remoteAddress;
+    const now = Date.now();
+    let entry = rateLimits.get(ip);
+    if (!entry || now > entry.resetAt) {
+        entry = { count: 0, resetAt: now + 60000 };
+        rateLimits.set(ip, entry);
+    }
+    entry.count++;
+    if (entry.count > maxPerMinute) {
+        res.status(429).json({ error: 'Too many requests' });
+        return false;
+    }
+    return true;
+}
+
+app.post('/join', (req, res, next) => { if (rateLimit(req, res, 30)) next(); });
+app.post('/api/rooms', (req, res, next) => { if (rateLimit(req, res, 20)) next(); });
+
 // ── Dashboard API ─────────────────────────────────────────────────────────────
 
-// List rooms + their hashes
 app.get('/api/rooms', (req, res) => {
     const host = getHost(req);
+    const proto = req.secure || req.get('x-forwarded-proto') === 'https' ? 'https' : 'http';
     const list = Array.from(rooms.values()).map(r => ({
         id:          r.id,
         label:       r.label,
@@ -56,12 +74,11 @@ app.get('/api/rooms', (req, res) => {
         memberCount: r.members.size,
         createdAt:   r.createdAt,
         hash:        encode(host, r.id, r.password),
-        joinUrl:     `http://${host}/join?r=${encodeURIComponent(r.id)}&p=${encodeURIComponent(r.password)}`,
+        joinUrl:     `${proto}://${host}/join?r=${encodeURIComponent(r.id)}&p=${encodeURIComponent(r.password)}`,
     }));
     res.json({ rooms: list, host });
 });
 
-// Create room → return hash
 app.post('/api/rooms', (req, res) => {
     const { label, password } = req.body;
     const host = getHost(req);
@@ -70,21 +87,25 @@ app.post('/api/rooms', (req, res) => {
     rooms.set(id, new Room(id, pwd, label || ('Room ' + id)));
 
     const hash = encode(host, id, pwd);
+    const proto = req.secure || req.get('x-forwarded-proto') === 'https' ? 'https' : 'http';
     console.log(`[Room] Created ${id}  hash: ${hash}`);
 
     res.json({
         success: true,
         id, label: rooms.get(id).label, password: pwd,
         hash,
-        joinUrl: `http://${host}/join?r=${id}&p=${encodeURIComponent(pwd)}`,
+        joinUrl: `${proto}://${host}/join?r=${id}&p=${encodeURIComponent(pwd)}`,
     });
 });
 
-// Delete room
 app.delete('/api/rooms/:id', (req, res) => {
     const id = req.params.id.toUpperCase();
-    rooms.has(id) ? rooms.delete(id) && res.json({ success: true })
-                  : res.status(404).json({ error: 'Not found' });
+    if (rooms.has(id)) {
+        rooms.delete(id);
+        res.json({ success: true });
+    } else {
+        res.status(404).json({ error: 'Not found' });
+    }
 });
 
 // ── App Signaling ─────────────────────────────────────────────────────────────
@@ -98,34 +119,31 @@ app.post('/join', (req, res) => {
     let room   = rooms.get(rid);
 
     if (!room) {
-        // App-created room (host made it in-app)
         room = new Room(rid, password || '', rid);
         rooms.set(rid, room);
     } else if (room.password && room.password !== password) {
         return res.status(403).json({ success: false, error: 'Wrong password' });
     }
 
+    // Clean previous session for this user (reconnect case)
+    tokens.forEach((data, t) => {
+        if (data.roomId === rid && data.userId === user_id) tokens.delete(t);
+    });
+    signalQueues.delete(`${rid}:${user_id}`);
+
     const token = crypto.randomBytes(16).toString('hex');
-    // 4-byte UDP auth key derived from token — sent in UDP header for validation
-    const udpKey = crypto.createHash('md5').update(token + rid).digest().slice(0, 4);
     tokens.set(token, { roomId: rid, userId: user_id });
     room.members.set(user_id, new Member(user_id, user_name));
     room.lastActivity = Date.now();
-
-    // Store UDP key for validation
-    udpKeys.set(`${rid}:${user_id}`, udpKey);
 
     console.log(`[Join] ${user_name} → ${rid} (${room.members.size} online)`);
 
     res.json({
         success:      true,
         token,
-        udp_key:      udpKey.toString('hex'),
         room_id:      rid,
         member_count: room.members.size,
         members:      memberList(room),
-        udp_host:     getHost(req).split(':')[0],
-        udp_port:     parseInt(UDP_PORT),
     });
 });
 
@@ -137,7 +155,8 @@ app.post('/leave', (req, res) => {
     const room = rooms.get(rid);
     if (room) { room.members.delete(user_id); if (!room.members.size) rooms.delete(rid); }
     tokens.delete(token);
-    udpKeys.delete(`${rid}:${user_id}`);
+    signalQueues.delete(`${rid}:${user_id}`);
+    console.log(`[Leave] ${user_id} left ${rid}`);
     res.json({ success: true });
 });
 
@@ -148,7 +167,8 @@ app.get('/poll', (req, res) => {
     if (!checkToken(token, rid, user_id)) return res.status(401).json({ error: 'Bad token' });
     const room = rooms.get(rid);
     if (!room) return res.json({ disbanded: true });
-    const m = room.members.get(user_id); if (m) m.lastSeen = Date.now();
+    const m = room.members.get(user_id);
+    if (m) { m.lastSeen = Date.now(); room.lastActivity = Date.now(); }
     res.json({ members: memberList(room), member_count: room.members.size });
 });
 
@@ -169,12 +189,43 @@ app.post('/ping', (req, res) => {
     res.json({ ok: true });
 });
 
-// Browser join redirect (for share links)
+// ── WebRTC Signaling ──────────────────────────────────────────────────────────
+
+app.post('/signal', (req, res) => {
+    const { room_id, user_id, token, target_id, type, payload } = req.body;
+    if (!room_id || !user_id || !target_id || !type || !payload)
+        return res.status(400).json({ error: 'Missing fields' });
+    const rid = room_id.toUpperCase();
+    if (!checkToken(token, rid, user_id)) return res.status(401).json({ error: 'Bad token' });
+
+    const key = `${rid}:${target_id}`;
+    if (!signalQueues.has(key)) signalQueues.set(key, []);
+    signalQueues.get(key).push({ from: user_id, type, payload, ts: Date.now() });
+    res.json({ ok: true });
+});
+
+app.get('/signal', (req, res) => {
+    const { room_id, user_id, token } = req.query;
+    if (!room_id || !user_id) return res.status(400).json({ error: 'Missing fields' });
+    const rid = room_id.toUpperCase();
+    if (!checkToken(token, rid, user_id)) return res.status(401).json({ error: 'Bad token' });
+
+    const key = `${rid}:${user_id}`;
+    const signals = signalQueues.get(key) || [];
+    signalQueues.set(key, []);
+    res.json({ signals });
+});
+
+// Browser join redirect
 app.get('/join', (req, res) => {
     const { r, p } = req.query;
     if (!r) return res.status(400).send('Missing room');
     const host     = getHost(req);
     const hash     = encode(host, r, p || '');
+    const safeR    = encodeURIComponent(r);
+    const safeP    = encodeURIComponent(p || '');
+    const safeHost = encodeURIComponent(host);
+    const deepLink = `voxlink://join?s=${safeHost}&r=${safeR}&p=${safeP}`;
     res.send(`<!DOCTYPE html><html><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Join ${escHtml(r)} · VoxLink</title>
@@ -198,52 +249,47 @@ font-weight:700;border-radius:10px;text-decoration:none;margin-bottom:10px}
 <div class="room">${escHtml(r)}</div>
 ${p ? `<div class="pwd">Password: <strong>${escHtml(p)}</strong></div>` : '<div class="pwd">No password</div>'}
 <div class="hash-label">Paste this hash into VoxLink app:</div>
-<div class="hash-box" id="hashEl">${hash}</div>
-<a class="btn" href="voxlink://join?s=${encodeURIComponent(host)}&r=${r}&p=${encodeURIComponent(p||'')}">Open in VoxLink App →</a>
+<div class="hash-box" id="hashEl">${escHtml(hash)}</div>
+<a class="btn" href="${escHtml(deepLink)}">Open in VoxLink App &rarr;</a>
 <div class="note">Copy the hash above and paste it into the app if the button doesn't work.</div>
 </div>
-<script>setTimeout(()=>{window.location.href='voxlink://join?s=${encodeURIComponent(host)}&r=${r}&p=${encodeURIComponent(p||'')}'},500)</script>
+<script>setTimeout(function(){window.location.href=${JSON.stringify(deepLink)}},500)</script>
 </body></html>`);
 });
 
-// ── UDP Relay ─────────────────────────────────────────────────────────────────
-const udp = dgram.createSocket('udp4');
-const udpMap = new Map();
-
-udp.on('message', (msg, rinfo) => {
-    if (msg.length < 24) return; // 8 room + 8 user + 4 udpKey + 4 seq = 24 header
-    const roomId = msg.slice(0,8).toString('utf8').replace(/\0/g,'').trim();
-    const userId = msg.slice(8,16).toString('utf8').replace(/\0/g,'').trim();
-    if (!roomId||!userId) return;
-
-    // Validate UDP auth key
-    const pktKey = msg.slice(16, 20);
-    const expected = udpKeys.get(`${roomId}:${userId}`);
-    if (!expected || !pktKey.equals(expected)) return; // drop unauthenticated packets
-
-    udpMap.set(`${roomId}:${userId}`, { addr: rinfo.address, port: rinfo.port, t: Date.now() });
-    const room = rooms.get(roomId); if (!room) return;
-    room.members.forEach((_,mid)=>{
-        if (mid===userId) return;
-        const d = udpMap.get(`${roomId}:${mid}`);
-        if (d && Date.now()-d.t < 30000) udp.send(msg, d.port, d.addr);
-    });
-});
-udp.bind(UDP_PORT, ()=>console.log(`UDP → :${UDP_PORT}`));
-
 // ── Cleanup ───────────────────────────────────────────────────────────────────
+const MEMBER_TIMEOUT  = 90000;
+const ROOM_TIMEOUT    = 600000;
+
 setInterval(()=>{
     const now = Date.now();
+    const activeUsers = new Set();
+    let removed = 0;
     rooms.forEach((r,rid)=>{
         r.members.forEach((m,uid)=>{
-            if(now-m.lastSeen>60000) {
+            if(now-m.lastSeen > MEMBER_TIMEOUT) {
                 r.members.delete(uid);
-                udpKeys.delete(`${rid}:${uid}`);
+                signalQueues.delete(`${rid}:${uid}`);
+                removed++;
+            } else {
+                activeUsers.add(`${rid}:${uid}`);
             }
         });
-        if (!r.members.size && now-r.lastActivity>300000) rooms.delete(rid);
+        if (!r.members.size && now-r.lastActivity > ROOM_TIMEOUT) {
+            rooms.delete(rid);
+        }
     });
-    udpMap.forEach((v,k)=>{ if(now-v.t>120000) udpMap.delete(k); });
+    if (removed) console.log(`[Cleanup] Removed ${removed} stale members`);
+    tokens.forEach((data, t) => {
+        if (!activeUsers.has(`${data.roomId}:${data.userId}`)) tokens.delete(t);
+    });
+    // Clean stale signal queue entries (older than 30s)
+    signalQueues.forEach((queue, key) => {
+        const filtered = queue.filter(s => now - s.ts < 30000);
+        if (filtered.length === 0) signalQueues.delete(key);
+        else signalQueues.set(key, filtered);
+    });
+    rateLimits.forEach((v,k)=>{ if(now>v.resetAt) rateLimits.delete(k); });
 }, 30000);
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

@@ -146,7 +146,7 @@ async function load() {
       <div class="card-actions">
         <button class="btn-copy" onclick="copyHash(${JSON.stringify(r.hash)}, this)">Copy Hash</button>
         <button class="btn-copy" onclick="copyHash(${JSON.stringify(r.joinUrl)}, this)">Copy Link</button>
-        <button class="btn-del"  onclick="del('${r.id}')">🗑</button>
+        <button class="btn-del"  onclick="del(${JSON.stringify(r.id)})">🗑</button>
       </div>
     </div>`).join('');
 }
@@ -191,7 +191,7 @@ function toast(msg) {
   setTimeout(()=>el.classList.remove('show'), 2200);
 }
 
-function esc(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function esc(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 
 document.addEventListener('keydown', e=>{
   if (e.key==='Enter'&&['iLabel','iPassword'].includes(e.target.id)) createRoom();
