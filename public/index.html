@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VoxLink Dashboard</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #0d0d0d; --surface: #141414; --card: #1a1a1a;
+      --border: #242424; --green: #4ade80; --red: #ef4444;
+      --text: #e5e5e5; --muted: #555;
+    }
+    body { background: var(--bg); color: var(--text);
+           font-family: 'Segoe UI', system-ui, sans-serif; min-height: 100vh; }
+
+    header { background: var(--surface); border-bottom: 1px solid var(--border);
+             padding: 0 28px; height: 56px; display: flex; align-items: center; gap: 10px; }
+    .logo { font-size: 20px; font-weight: 800; color: var(--green); }
+    .sub  { font-size: 12px; color: var(--muted); }
+
+    .wrap { max-width: 860px; margin: 0 auto; padding: 28px 20px; }
+
+    /* Create panel */
+    .create { background: var(--surface); border: 1px solid var(--border);
+              border-radius: 12px; padding: 22px; margin-bottom: 28px; }
+    .create h2 { font-size: 14px; color: #999; margin-bottom: 16px; font-weight: 500; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; }
+    input[type=text] { flex: 1; min-width: 140px; background: #0d0d0d;
+                       border: 1px solid var(--border); color: var(--text);
+                       padding: 10px 14px; border-radius: 8px; font-size: 13px; outline: none; }
+    input[type=text]:focus { border-color: var(--green); }
+    input::placeholder { color: #333; }
+    .btn-create { background: var(--green); color: #0d0d0d; border: none;
+                  padding: 10px 22px; border-radius: 8px; font-size: 13px;
+                  font-weight: 700; cursor: pointer; white-space: nowrap; }
+    .btn-create:hover { filter: brightness(1.1); }
+    .btn-create:disabled { background: #222; color: #555; cursor: not-allowed; }
+
+    /* Section */
+    .sec-head { font-size: 11px; text-transform: uppercase; letter-spacing: 1.5px;
+                color: var(--muted); margin-bottom: 14px; display: flex;
+                align-items: center; gap: 8px; }
+    .badge { background: #1e1e1e; color: var(--green); padding: 2px 8px;
+             border-radius: 10px; font-size: 11px; letter-spacing: 0; }
+
+    /* Room cards */
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 14px; }
+    .card { background: var(--card); border: 1px solid var(--border);
+            border-radius: 12px; padding: 18px; position: relative; overflow: hidden; }
+    .card::before { content:''; position:absolute; top:0; left:0; right:0;
+                    height:2px; background: linear-gradient(90deg, var(--green) 0%, transparent 100%); }
+
+    .card-top { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px; }
+    .card-label { font-size: 15px; font-weight: 700; }
+    .card-id { font-family: monospace; font-size: 11px; color: var(--green);
+               background: #0a1a0a; padding: 2px 7px; border-radius: 4px; margin-top: 3px; }
+    .card-online { font-size: 11px; color: var(--muted); display: flex; align-items: center; gap: 5px; }
+    .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); }
+    .dot.off { background: #333; }
+    .card-pass { font-size: 12px; color: var(--muted); margin-bottom: 14px; }
+    .card-pass span { color: #aaa; font-family: monospace; }
+
+    /* Hash box — the main thing */
+    .hash-label { font-size: 10px; text-transform: uppercase; letter-spacing: 1px;
+                  color: var(--muted); margin-bottom: 6px; }
+    .hash-box { background: #0d0d0d; border: 1px solid #1e1e1e; border-radius: 7px;
+                padding: 10px 12px; font-family: monospace; font-size: 11px;
+                color: var(--green); word-break: break-all; line-height: 1.5;
+                margin-bottom: 10px; cursor: text; user-select: all; }
+
+    .card-actions { display: flex; gap: 7px; }
+    .btn-copy { flex: 1; background: #1e1e1e; border: 1px solid #2a2a2a; color: #aaa;
+                padding: 7px 10px; border-radius: 7px; font-size: 12px; cursor: pointer; }
+    .btn-copy:hover { background: #252525; color: #fff; }
+    .btn-copy.ok { background: #0a1f0a; border-color: var(--green); color: var(--green); }
+    .btn-del { background: transparent; border: 1px solid #222; color: #444;
+               padding: 7px 12px; border-radius: 7px; font-size: 12px; cursor: pointer; }
+    .btn-del:hover { border-color: var(--red); color: var(--red); }
+
+    /* Empty */
+    .empty { text-align: center; padding: 50px 20px; color: var(--muted); }
+    .empty .ico { font-size: 40px; margin-bottom: 14px; }
+
+    /* Toast */
+    .toast { position: fixed; bottom: 20px; right: 20px; background: #0a1f0a;
+             border: 1px solid var(--green); color: var(--green); padding: 10px 18px;
+             border-radius: 9px; font-size: 13px; opacity: 0;
+             transform: translateY(20px); transition: all .25s; pointer-events: none; z-index: 999; }
+    .toast.show { opacity: 1; transform: translateY(0); }
+
+    @media(max-width:560px){ header{padding:0 14px} .wrap{padding:18px 12px} .row{flex-direction:column} }
+  </style>
+</head>
+<body>
+
+<header>
+  <span class="logo">🎮 VoxLink</span>
+  <span class="sub">Dashboard</span>
+</header>
+
+<div class="wrap">
+
+  <div class="create">
+    <h2>Create New Room</h2>
+    <div class="row">
+      <input type="text" id="iLabel"    placeholder="Room name (e.g. Squad Alpha)" maxlength="30">
+      <input type="text" id="iPassword" placeholder="Password (auto if blank)"     maxlength="20">
+      <button class="btn-create" id="btnCreate" onclick="createRoom()">+ Create</button>
+    </div>
+  </div>
+
+  <div class="sec-head">Active Rooms <span class="badge" id="cnt">0</span></div>
+  <div class="grid" id="grid">
+    <div class="empty"><div class="ico">🔇</div><p>No rooms yet. Create one above.</p></div>
+  </div>
+
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+async function load() {
+  const d = await fetch('/api/rooms').then(r=>r.json()).catch(()=>null);
+  if (!d) return;
+  document.getElementById('cnt').textContent = d.rooms.length;
+  const g = document.getElementById('grid');
+  if (!d.rooms.length) {
+    g.innerHTML = '<div class="empty"><div class="ico">🔇</div><p>No rooms yet. Create one above.</p></div>';
+    return;
+  }
+  g.innerHTML = d.rooms.map(r=>`
+    <div class="card" id="c${r.id}">
+      <div class="card-top">
+        <div>
+          <div class="card-label">${esc(r.label)}</div>
+          <div class="card-id">${r.id}</div>
+        </div>
+        <div class="card-online">
+          <span class="dot ${r.memberCount>0?'':'off'}"></span>
+          ${r.memberCount} online
+        </div>
+      </div>
+      <div class="card-pass">Password: <span>${esc(r.password)}</span></div>
+      <div class="hash-label">📋 Room Hash — paste into VoxLink app</div>
+      <div class="hash-box" onclick="selectHash(this)">${esc(r.hash)}</div>
+      <div class="card-actions">
+        <button class="btn-copy" onclick="copyHash(${JSON.stringify(r.hash)}, this)">Copy Hash</button>
+        <button class="btn-copy" onclick="copyHash(${JSON.stringify(r.joinUrl)}, this)">Copy Link</button>
+        <button class="btn-del"  onclick="del('${r.id}')">🗑</button>
+      </div>
+    </div>`).join('');
+}
+
+async function createRoom() {
+  const label    = document.getElementById('iLabel').value.trim();
+  const password = document.getElementById('iPassword').value.trim();
+  const btn      = document.getElementById('btnCreate');
+  btn.disabled   = true; btn.textContent = '…';
+  const d = await fetch('/api/rooms',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({label,password})}).then(r=>r.json()).catch(()=>null);
+  btn.disabled = false; btn.textContent = '+ Create';
+  if (d?.success) {
+    document.getElementById('iLabel').value = '';
+    document.getElementById('iPassword').value = '';
+    toast('✓ Room created');
+    load();
+  }
+}
+
+async function del(id) {
+  if (!confirm('Delete room ' + id + '?')) return;
+  await fetch('/api/rooms/'+id,{method:'DELETE'});
+  document.getElementById('c'+id)?.remove();
+  toast('Deleted');
+  load();
+}
+
+function copyHash(text, btn) {
+  navigator.clipboard.writeText(text).then(()=>{
+    const orig = btn.textContent;
+    btn.textContent='✓ Copied!'; btn.classList.add('ok');
+    setTimeout(()=>{ btn.textContent=orig; btn.classList.remove('ok'); }, 2000);
+  });
+}
+
+function selectHash(el) { window.getSelection().selectAllChildren(el); }
+
+function toast(msg) {
+  const el = document.getElementById('toast');
+  el.textContent = msg; el.classList.add('show');
+  setTimeout(()=>el.classList.remove('show'), 2200);
+}
+
+function esc(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+document.addEventListener('keydown', e=>{
+  if (e.key==='Enter'&&['iLabel','iPassword'].includes(e.target.id)) createRoom();
+});
+
+load(); setInterval(load, 8000);
+</script>
+</body>
+</html>
